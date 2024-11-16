@@ -12,22 +12,14 @@ var __importDefault = (this && this.__importDefault) || function (mod) {
     return (mod && mod.__esModule) ? mod : { "default": mod };
 };
 Object.defineProperty(exports, "__esModule", { value: true });
-// db.ts - สำหรับการเชื่อมต่อกับ PostgreSQL
-const pg_1 = require("pg");
-const pool = new pg_1.Pool({
-    user: 'your_username',
-    host: 'localhost',
-    database: 'expense_tracker',
-    password: 'your_password',
-    port: 5432,
-});
-exports.default = pool;
 // server.ts - API Server
 const fastify_1 = __importDefault(require("fastify"));
 const crypto_1 = __importDefault(require("crypto"));
+const RoutesApi_1 = __importDefault(require("./RoutesDB/RoutesApi")); // นำเข้าไฟล์ routes
 const server = (0, fastify_1.default)({
     logger: true
 });
+server.register(RoutesApi_1.default);
 server.register(require('@fastify/formbody'));
 server.register(require('@fastify/cors'));
 // Authentication setup (จากโค้ดเดิม)

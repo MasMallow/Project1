@@ -1,45 +1,112 @@
 import { FastifyInstance, FastifyRequest, FastifyReply } from 'fastify';
+import { ProfanityFilter } from './profanityFilter';
 import pool from './db';
+import { randomUUID } from 'crypto';
+import path from 'path';
+import fs from 'fs/promises';
+import { createWriteStream } from 'fs';
+import { pipeline } from 'stream/promises';
 
-// สร้าง interface สำหรับ request parameters และ body
 interface ExpenseBody {
     title: string;
     amount: number;
     type: 'INCOME' | 'EXPENSE';
     category: string;
     description?: string;
+    note?: string;
+    accountType?: string;
 }
 
-interface ExpenseParams {
+interface ExpenseQuerystring {
+    month?: number;
+    year?: number;
+    type?: 'INCOME' | 'EXPENSE';
+    category?: string;
+    accountType?: string;
+    startDate?: string;
+    endDate?: string;
+}
+
+interface CategoryBody {
+    name: string;
+    type: string;
+}
+
+interface RequestParams {
     id: string;
+    word: string;
 }
 
-// สร้างฟังก์ชันที่จะ export ไปใช้ใน server.ts
 export default async function expenseRoutes(server: FastifyInstance) {
-    // 1. เพิ่มรายการใหม่
-    server.post<{
-        Body: ExpenseBody;
-    }>('/expenses', {
-        schema: {
-            body: {
-                type: 'object',
-                properties: {
-                    title: { type: 'string' },
-                    amount: { type: 'number' },
-                    type: { type: 'string', enum: ['INCOME', 'EXPENSE'] },
-                    category: { type: 'string' },
-                    description: { type: 'string' }
-                },
-                required: ['title', 'amount', 'type', 'category']
-            }
-        }
-    }, async (req, reply: FastifyReply) => {
-        try {
-            const { title, amount, type, category, description } = req.body;
+    // File upload setup
+    await server.register(import('@fastify/multipart'), {
+        limits: {
+            fieldSize: 1000000, // 1MB
+            fields: 10,
+            fileSize: 5000000, // 5MB
+            files: 1,
+        },
+    });
 
+    // 1. Create expense with file upload
+    server.post('/expenses', async (req, reply) => {
+        try {
+            const data = await req.file();
+            if (!data) {
+                reply.status(400).send({ message: 'No file or form data provided' });
+                return;
+            }
+
+            let receiptPath: string | null = null;
+
+            // Parse form data
+            const fields = data.fields as Record<string, { value: string }>;
+            const body: ExpenseBody = {
+                title: fields.title?.value,
+                amount: parseFloat(fields.amount?.value),
+                type: fields.type?.value as 'INCOME' | 'EXPENSE',
+                category: fields.category?.value,
+                description: fields.description?.value,
+                note: fields.note?.value,
+                accountType: fields.accountType?.value,
+            };
+
+            // Validate required fields
+            if (!body.title || !body.amount || !body.type || !body.category) {
+                reply.status(400).send({ message: 'Missing required fields' });
+                return;
+            }
+
+            // Check for profanity
+            const filter = new ProfanityFilter();
+            if (filter.containsProfanity(body.title) || 
+                filter.containsProfanity(body.description || '') ||
+                filter.containsProfanity(body.note || '')) {
+                reply.status(400).send({ message: 'Content contains inappropriate language' });
+                return;
+            }
+
+            // Handle file upload
+            if (data.file) {
+                const filename = `${randomUUID()}${path.extname(data.filename)}`;
+                const uploadDir = path.join(__dirname, '../../uploads');
+                await fs.mkdir(uploadDir, { recursive: true });
+                const filepath = path.join(uploadDir, filename);
+                await pipeline(data.file, createWriteStream(filepath));
+                receiptPath = `/uploads/${filename}`;
+            }
+
+            // Insert to database
             const result = await pool.query(
-                'INSERT INTO expenses (title, amount, type, category, description, date) VALUES ($1, $2, $3, $4, $5, NOW()) RETURNING *',
-                [title, amount, type, category, description]
+                `INSERT INTO expenses (
+                    title, amount, type, category, description, note, 
+                    receipt_path, account_type, date
+                ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, NOW()) 
+                RETURNING *`,
+                [
+                    body.title, body.amount, body.type, body.category,
+                    body.description, body.note, receiptPath, body.accountType
+                ]
             );
 
             reply.send(result.rows[0]);
@@ -48,107 +115,126 @@ export default async function expenseRoutes(server: FastifyInstance) {
         }
     });
 
-    // 2. ดึงรายการทั้งหมด
-    server.get('/expenses', async (req: FastifyRequest, reply: FastifyReply) => {
+    // 2. Get expenses with filters
+    server.get<{ Querystring: ExpenseQuerystring }>('/expenses', async (req, reply) => {
         try {
-            const result = await pool.query('SELECT * FROM expenses ORDER BY date DESC');
+            const {
+                month, year, type, category, accountType,
+                startDate, endDate
+            } = req.query;
+
+            let query = 'SELECT * FROM expenses WHERE 1=1';
+            const params: any[] = [];
+            let paramIndex = 1;
+
+            if (month) {
+                query += ` AND EXTRACT(MONTH FROM date) = $${paramIndex++}`;
+                params.push(month);
+            }
+
+            if (year) {
+                query += ` AND EXTRACT(YEAR FROM date) = $${paramIndex++}`;
+                params.push(year);
+            }
+
+            if (type) {
+                query += ` AND type = $${paramIndex++}`;
+                params.push(type);
+            }
+
+            if (category) {
+                query += ` AND category = $${paramIndex++}`;
+                params.push(category);
+            }
+
+            if (accountType) {
+                query += ` AND account_type = $${paramIndex++}`;
+                params.push(accountType);
+            }
+
+            if (startDate) {
+                query += ` AND date >= $${paramIndex++}`;
+                params.push(startDate);
+            }
+
+            if (endDate) {
+                query += ` AND date <= $${paramIndex++}`;
+                params.push(endDate);
+            }
+
+            query += ' ORDER BY date DESC';
+
+            const result = await pool.query(query, params);
             reply.send(result.rows);
         } catch (err) {
             reply.status(500).send(err);
         }
     });
 
-    // 3. ดึงรายการตาม ID
-    server.get<{
-        Params: ExpenseParams;
-    }>('/expenses/:id', async (req, reply: FastifyReply) => {
+    // 3. Category Management
+    server.get('/categories', async (req, reply) => {
         try {
-            const { id } = req.params;
-            const result = await pool.query('SELECT * FROM expenses WHERE id = $1', [id]);
-
-            if (result.rows.length === 0) {
-                reply.status(404).send({ message: 'Expense not found' });
-                return;
-            }
-
-            reply.send(result.rows[0]);
+            const result = await pool.query(
+                'SELECT * FROM categories ORDER BY type, name'
+            );
+            reply.send(result.rows);
         } catch (err) {
             reply.status(500).send(err);
         }
     });
 
-    // 4. แก้ไขรายการ
-    server.put<{
-        Params: ExpenseParams;
-        Body: ExpenseBody;
-    }>('/expenses/:id', {
-        schema: {
-            body: {
-                type: 'object',
-                properties: {
-                    title: { type: 'string' },
-                    amount: { type: 'number' },
-                    type: { type: 'string', enum: ['INCOME', 'EXPENSE'] },
-                    category: { type: 'string' },
-                    description: { type: 'string' }
-                }
-            }
-        }
-    }, async (req, reply: FastifyReply) => {
+    server.post<{ Body: CategoryBody }>('/categories', async (req, reply) => {
         try {
-            const { id } = req.params;
-            const { title, amount, type, category, description } = req.body;
+            const { name, type } = req.body;
+            
+            const filter = new ProfanityFilter();
+            if (filter.containsProfanity(name)) {
+                reply.status(400).send({ message: 'Category name contains inappropriate language' });
+                return;
+            }
 
             const result = await pool.query(
-                'UPDATE expenses SET title = $1, amount = $2, type = $3, category = $4, description = $5 WHERE id = $6 RETURNING *',
-                [title, amount, type, category, description, id]
+                'INSERT INTO categories (name, type) VALUES ($1, $2) RETURNING *',
+                [name, type]
             );
-
-            if (result.rows.length === 0) {
-                reply.status(404).send({ message: 'Expense not found' });
-                return;
-            }
-
             reply.send(result.rows[0]);
         } catch (err) {
             reply.status(500).send(err);
         }
     });
 
-    // 5. ลบรายการ
-    server.delete<{
-        Params: ExpenseParams;
-    }>('/expenses/:id', async (req, reply: FastifyReply) => {
+    server.delete<{ Params: RequestParams }>('/categories/:id', async (req, reply) => {
         try {
-            const { id } = req.params;
-            const result = await pool.query('DELETE FROM expenses WHERE id = $1 RETURNING *', [id]);
-
+            const result = await pool.query(
+                'DELETE FROM categories WHERE id = $1 RETURNING *',
+                [req.params.id]
+            );
+            
             if (result.rows.length === 0) {
-                reply.status(404).send({ message: 'Expense not found' });
+                reply.status(404).send({ message: 'Category not found' });
                 return;
             }
-
-            reply.send({ message: 'Expense deleted successfully' });
+            
+            reply.send({ message: 'Category deleted successfully' });
         } catch (err) {
             reply.status(500).send(err);
         }
     });
 
-    // 6. ดึงสรุปรายรับ-รายจ่าย
-    server.get('/expenses/summary/monthly', async (req: FastifyRequest, reply: FastifyReply) => {
+    // 4. Profanity Management
+    server.post<{ Body: { word: string } }>('/profanity', async (req, reply) => {
         try {
-            const result = await pool.query(`
-                SELECT 
-                    EXTRACT(MONTH FROM date) as month,
-                    EXTRACT(YEAR FROM date) as year,
-                    type,
-                    SUM(amount) as total
-                FROM expenses
-                GROUP BY EXTRACT(MONTH FROM date), EXTRACT(YEAR FROM date), type
-                ORDER BY year DESC, month DESC
-            `);
+            await ProfanityFilter.addWord(req.body.word);
+            reply.send({ message: 'Word added successfully' });
+        } catch (err) {
+            reply.status(500).send(err);
+        }
+    });
 
-            reply.send(result.rows);
+    server.delete<{ Params: RequestParams }>('/profanity/:word', async (req, reply) => {
+        try {
+            await ProfanityFilter.removeWord(req.params.word);
+            reply.send({ message: 'Word removed successfully' });
         } catch (err) {
             reply.status(500).send(err);
         }

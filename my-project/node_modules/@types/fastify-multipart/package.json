@@ -1,0 +1,12 @@
+{
+    "name": "@types/fastify-multipart",
+    "version": "0.7.2",
+    "description": "Stub TypeScript definitions entry for fastify-multipart, which provides its own types definitions",
+    "main": "",
+    "scripts": {},
+    "license": "MIT",
+    "dependencies": {
+        "fastify-multipart": "*"
+    },
+    "deprecated": "This is a stub types definition. fastify-multipart provides its own type definitions, so you do not need this installed."
+}
