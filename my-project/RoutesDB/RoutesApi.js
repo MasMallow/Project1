@@ -124,6 +124,96 @@ function expenseRoutes(server) {
                 reply.status(500).send(err);
             }
         }));
-        // ... other routes remain the same ...
+        // API สำหรับเพิ่มบัญชีการใช้งาน
+        server.post('/accounts', (req, reply) => __awaiter(this, void 0, void 0, function* () {
+            const { name } = req.body;
+            try {
+                yield db_1.default.query("INSERT INTO accounts (name) VALUES ($1)", [name]);
+                reply.send({ message: 'Account added successfully' });
+            }
+            catch (err) {
+                reply.status(500).send(err);
+            }
+        }));
+        // API สำหรับลบบัญชีการใช้งาน
+        server.delete('/accounts/:id', (req, reply) => __awaiter(this, void 0, void 0, function* () {
+            const { id } = req.params;
+            try {
+                yield db_1.default.query("DELETE FROM accounts WHERE id = $1", [id]);
+                reply.send({ message: 'Account deleted successfully' });
+            }
+            catch (err) {
+                reply.status(500).send(err);
+            }
+        }));
+        // API สำหรับเพิ่มประเภทการใช้จ่าย
+        server.post('/expense-types', (req, reply) => __awaiter(this, void 0, void 0, function* () {
+            const { name } = req.body;
+            try {
+                yield db_1.default.query("INSERT INTO expense_types (name) VALUES ($1)", [name]);
+                reply.send({ message: 'Expense type added successfully' });
+            }
+            catch (err) {
+                reply.status(500).send(err);
+            }
+        }));
+        // API สำหรับลบประเภทการใช้จ่าย
+        server.delete('/expense-types/:id', (req, reply) => __awaiter(this, void 0, void 0, function* () {
+            const { id } = req.params;
+            try {
+                yield db_1.default.query("DELETE FROM expense_types WHERE id = $1", [id]);
+                reply.send({ message: 'Expense type deleted successfully' });
+            }
+            catch (err) {
+                reply.status(500).send(err);
+            }
+        }));
+        // API สำหรับสรุปยอดการใช้จ่าย
+        server.get('/expenses/summary', (req, reply) => __awaiter(this, void 0, void 0, function* () {
+            try {
+                const result = yield db_1.default.query(`
+                    SELECT type, SUM(amount) AS total_amount
+                    FROM transactions
+                    GROUP BY type
+                `);
+                reply.send(result.rows);
+            }
+            catch (err) {
+                reply.status(500).send(err);
+            }
+        }));
+        // API สำหรับ filter ข้อมูลการใช้จ่าย
+        server.get('/expenses/filter', (req, reply) => __awaiter(this, void 0, void 0, function* () {
+            const { month, year, type, accountId } = req.query;
+            let whereClause = "WHERE 1=1";
+            const params = [];
+            let paramIndex = 1;
+            if (month) {
+                whereClause += ` AND EXTRACT(MONTH FROM date) = $${paramIndex++}`;
+                params.push(month);
+            }
+            if (year) {
+                whereClause += ` AND EXTRACT(YEAR FROM date) = $${paramIndex++}`;
+                params.push(year);
+            }
+            if (type) {
+                whereClause += ` AND type = $${paramIndex++}`;
+                params.push(type);
+            }
+            if (accountId) {
+                whereClause += ` AND account_id = $${paramIndex++}`;
+                params.push(accountId);
+            }
+            try {
+                const result = yield db_1.default.query(`
+                    SELECT * FROM transactions ${whereClause}
+                    ORDER BY date DESC
+                `, params);
+                reply.send(result.rows);
+            }
+            catch (err) {
+                reply.status(500).send(err);
+            }
+        }));
     });
 }
