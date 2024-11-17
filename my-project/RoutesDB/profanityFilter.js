@@ -11,26 +11,34 @@ var __awaiter = (this && this.__awaiter) || function (thisArg, _arguments, P, ge
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.ProfanityFilter = void 0;
 class ProfanityFilter {
-    // Check if text contains profanity
-    containsProfanity(text) {
-        const words = text.toLowerCase().split(/\s+/);
-        return words.some(word => ProfanityFilter.profanityWords.has(word));
-    }
-    // Add a word to profanity list
-    static addWord(word) {
+    static initialize(pool) {
         return __awaiter(this, void 0, void 0, function* () {
+            const result = yield pool.query('SELECT word FROM profanity_words');
+            result.rows.forEach((row) => {
+                ProfanityFilter.profanityWords.add(row.word.toLowerCase());
+            });
+        });
+    }
+    static filterText(text) {
+        if (!text)
+            return text;
+        return text.split(' ').map(word => {
+            return ProfanityFilter.profanityWords.has(word.toLowerCase())
+                ? '***'
+                : word;
+        }).join(' ');
+    }
+    static addWord(pool, word) {
+        return __awaiter(this, void 0, void 0, function* () {
+            yield pool.query('INSERT INTO profanity_words (word) VALUES ($1) ON CONFLICT DO NOTHING', [word.toLowerCase()]);
             ProfanityFilter.profanityWords.add(word.toLowerCase());
         });
     }
-    // Remove a word from profanity list
-    static removeWord(word) {
+    static removeWord(pool, word) {
         return __awaiter(this, void 0, void 0, function* () {
+            yield pool.query('DELETE FROM profanity_words WHERE word = $1', [word.toLowerCase()]);
             ProfanityFilter.profanityWords.delete(word.toLowerCase());
         });
-    }
-    // Get all profanity words
-    static getProfanityWords() {
-        return Array.from(ProfanityFilter.profanityWords);
     }
 }
 exports.ProfanityFilter = ProfanityFilter;

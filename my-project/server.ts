@@ -1,69 +1,73 @@
-// types.ts - สำหรับกำหนด TypeScript interfaces
-export interface Expense {
-    id: number;
-    title: string;
-    amount: number;
-    type: 'INCOME' | 'EXPENSE';
-    category: string;
-    date: Date;
-    description?: string;
-}
-
-// server.ts - API Server
+// server.ts
 import fastify, { FastifyRequest, FastifyReply } from "fastify";
 import crypto from "crypto";
-import expenseRoutes from './RoutesDB/RoutesApi'; // นำเข้าไฟล์ routes
+import expenseRoutes from './RoutesDB/RoutesApi';
+import authRoutes from './RoutesDB/auth';
+import fastifyPostgres from '@fastify/postgres';
+
+// Define session type
+interface Session {
+    [key: string]: {
+        username: string;
+        timestamp: number;
+    }
+}
+
+// Initialize session storage
+const session: Session = {};
+
+// Create cleanup function for expired sessions
+const cleanupSessions = () => {
+    const now = Date.now();
+    Object.entries(session).forEach(([token, data]) => {
+        // Remove sessions older than 24 hours
+        if (now - data.timestamp > 24 * 60 * 60 * 1000) {
+            delete session[token];
+        }
+    });
+};
+
+// Run cleanup every hour
+setInterval(cleanupSessions, 60 * 60 * 1000);
 
 const server = fastify({
     logger: true
 });
 
-server.register(expenseRoutes);
+// Register plugins
 server.register(require('@fastify/formbody'));
 server.register(require('@fastify/cors'));
 
-// Authentication setup (จากโค้ดเดิม)
-const session: { [key: string]: string } = {};
-
-interface LoginBody {
-    username: string;
-    password: string;
-}
-
-// Authentication routes (จากโค้ดเดิม)
-server.post<{ Body: LoginBody }>("/login", {
-    schema: {
-        body: {
-            type: 'object',
-            properties: {
-                username: { type: 'string' },
-                password: { type: 'string' }
-            },
-            required: ['username', 'password']
-        }
-    }
-}, async (req, reply) => {
-    const { username, password } = req.body;
-
-    if (username === "admin" && password === "password123") {
-        const token = crypto.randomBytes(16).toString("hex");
-        session[token] = username;
-        reply.send({ token });
-    } else {
-        reply.status(401).send({ message: "Invalid username or password" });
-    }
+// Register PostgreSQL
+server.register(fastifyPostgres, {
+    connectionString: process.env.DATABASE_URL || 'postgresql://username:password@localhost:5432/database_name'
 });
 
+// Make session available to routes
+declare module 'fastify' {
+    interface FastifyInstance {
+        session: Session;
+    }
+}
+
+// Decorator to add session to fastify instance
+server.decorate('session', session);
+
+// Register routes
+server.register(authRoutes);
+server.register(expenseRoutes);
 
 // Authentication middleware
 server.addHook("preHandler", (req, reply, done) => {
-    if (req.url === '/login') {
+    if (req.url === '/login' || req.url === '/register') {
         done();
         return;
     }
 
     const token = req.headers['authorization'];
-    if (token && session[token as string]) {
+    if (token && session[token]) {
+        // Update timestamp on successful authentication
+        session[token].timestamp = Date.now();
         done();
     } else {
         reply.status(401).send({ message: 'Unauthorized' });

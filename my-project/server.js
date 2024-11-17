@@ -12,49 +12,50 @@ var __importDefault = (this && this.__importDefault) || function (mod) {
     return (mod && mod.__esModule) ? mod : { "default": mod };
 };
 Object.defineProperty(exports, "__esModule", { value: true });
-// server.ts - API Server
+// server.ts
 const fastify_1 = __importDefault(require("fastify"));
-const crypto_1 = __importDefault(require("crypto"));
-const RoutesApi_1 = __importDefault(require("./RoutesDB/RoutesApi")); // นำเข้าไฟล์ routes
+const RoutesApi_1 = __importDefault(require("./RoutesDB/RoutesApi"));
+const auth_1 = __importDefault(require("./RoutesDB/auth"));
+const postgres_1 = __importDefault(require("@fastify/postgres"));
+// Initialize session storage
+const session = {};
+// Create cleanup function for expired sessions
+const cleanupSessions = () => {
+    const now = Date.now();
+    Object.entries(session).forEach(([token, data]) => {
+        // Remove sessions older than 24 hours
+        if (now - data.timestamp > 24 * 60 * 60 * 1000) {
+            delete session[token];
+        }
+    });
+};
+// Run cleanup every hour
+setInterval(cleanupSessions, 60 * 60 * 1000);
 const server = (0, fastify_1.default)({
     logger: true
 });
-server.register(RoutesApi_1.default);
+// Register plugins
 server.register(require('@fastify/formbody'));
 server.register(require('@fastify/cors'));
-// Authentication setup (จากโค้ดเดิม)
-const session = {};
-// Authentication routes (จากโค้ดเดิม)
-server.post("/login", {
-    schema: {
-        body: {
-            type: 'object',
-            properties: {
-                username: { type: 'string' },
-                password: { type: 'string' }
-            },
-            required: ['username', 'password']
-        }
-    }
-}, (req, reply) => __awaiter(void 0, void 0, void 0, function* () {
-    const { username, password } = req.body;
-    if (username === "admin" && password === "password123") {
-        const token = crypto_1.default.randomBytes(16).toString("hex");
-        session[token] = username;
-        reply.send({ token });
-    }
-    else {
-        reply.status(401).send({ message: "Invalid username or password" });
-    }
-}));
+// Register PostgreSQL
+server.register(postgres_1.default, {
+    connectionString: process.env.DATABASE_URL || 'postgresql://username:password@localhost:5432/database_name'
+});
+// Decorator to add session to fastify instance
+server.decorate('session', session);
+// Register routes
+server.register(auth_1.default);
+server.register(RoutesApi_1.default);
 // Authentication middleware
 server.addHook("preHandler", (req, reply, done) => {
-    if (req.url === '/login') {
+    if (req.url === '/login' || req.url === '/register') {
         done();
         return;
     }
     const token = req.headers['authorization'];
     if (token && session[token]) {
+        // Update timestamp on successful authentication
+        session[token].timestamp = Date.now();
         done();
     }
     else {
