@@ -1,6 +1,9 @@
 import { FastifyInstance, FastifyRequest, FastifyReply } from "fastify";
 import { ProfanityFilter } from "./profanityFilter";
+import fastifyMultipart from '@fastify/multipart';
 import pool from "./db";
+import multer from 'fastify-multer';
+import path from 'path';
 
 // เพิ่ม interface สำหรับ pagination parameters
 interface PaginationQuery {
@@ -39,6 +42,38 @@ interface ExpenseQuerystring {
     accountId?: number;
 }
 
+interface TransactionFormData {
+    amount: string;
+    type: string;
+    category_id: string;
+    account_id: string;
+    note?: string;
+}
+
+// ตั้งค่า multer สำหรับอัพโหลดไฟล์
+const storage = multer.diskStorage({
+    destination: './uploads',
+    filename: (req, file, cb) => {
+        const uniqueName = `${Date.now()}-${Math.round(Math.random() * 1E9)}${path.extname(file.originalname)}`;
+        cb(null, uniqueName);
+    }
+});
+
+const upload = multer({ 
+    storage: storage,
+    fileFilter: (req, file, cb) => {
+        // อนุญาตเฉพาะไฟล์รูปภาพ
+        if (file.mimetype.startsWith('image/')) {
+            cb(null, true);
+        } else {
+            cb(new Error('Only image files are allowed!'), false);
+        }
+    },
+    limits: {
+        fileSize: 5 * 1024 * 1024  // จำกัดขนาดไฟล์ที่ 5MB
+    }
+});
+
 // สำหรับฟังก์ชันที่ใช้ validate limit ของข้อมูล
 const validateLimit = (limit?: number): number => {
     const allowedLimits = [10, 20, 50, 100]; // กำหนดค่าที่อนุญาตให้เป็น limit
@@ -47,6 +82,18 @@ const validateLimit = (limit?: number): number => {
 };
 
 export default async function expenseRoutes(server: FastifyInstance) {
+    await server.register(fastifyMultipart, {
+        attachFieldsToBody: true,
+        sharedSchemaId: '#mySharedSchema',
+        limits: {
+            fieldNameSize: 100,
+            fieldSize: 100,
+            fields: 10,
+            fileSize: 5000000,
+            files: 1
+        }
+    });
+
     // ดึงข้อมูลการใช้จ่ายด้วยการแบ่งหน้า
     server.get<{ Querystring: ExpenseQuerystring }>(
         "/expenses",
@@ -284,4 +331,143 @@ export default async function expenseRoutes(server: FastifyInstance) {
             reply.status(500).send(err);
         }
     });
+
+    server.post('/transactions', {
+        preHandler: upload.single('receipt')
+    }, async (req: FastifyRequest, reply: FastifyReply) => {
+        try {
+            // Debug logs
+            console.log('Raw request body:', req.body);
+            console.log('Request headers:', req.headers);
+            console.log('Content-Type:', req.headers['content-type']);
+            
+            // Type assertion และ log ค่าหลังจาก type assertion
+            const body = req.body as TransactionFormData;
+            console.log('Body after type assertion:', body);
+            console.log('Amount value:', body.amount);
+            console.log('Amount type:', typeof body.amount);
+            
+            // ถ้า amount เป็น undefined หรือ empty string
+            if (!body.amount) {
+                console.log('Amount is missing or empty');
+                return reply.status(400).send({ 
+                    message: 'Amount is required',
+                    receivedBody: req.body
+                });
+            }
+    
+            // แปลง amount เป็น number
+            const amount = parseFloat(body.amount);
+            console.log('Parsed amount:', amount);
+            console.log('Is amount NaN?:', isNaN(amount));
+    
+            // ตรวจสอบความถูกต้องของข้อมูล
+            if (isNaN(amount)) {
+                return reply.status(400).send({ 
+                    message: 'Invalid amount format',
+                    receivedValue: body.amount,
+                    parsedAmount: amount
+                });
+            }
+    
+            const { type, note } = body;
+    
+            // แปลง category_id และ account_id เป็น number
+            const categoryId = parseInt(body.category_id);
+            const accountId = parseInt(body.account_id);
+            console.log('Parsed IDs:', { categoryId, accountId });
+    
+            if (isNaN(categoryId) || isNaN(accountId)) {
+                return reply.status(400).send({ 
+                    message: 'Invalid category_id or account_id',
+                    categoryId: body.category_id,
+                    accountId: body.account_id
+                });
+            }
+    
+            const file = (req as any).file;
+            console.log('Uploaded file:', file);
+            
+            // กรองคำหยาบใน note
+            const filter = new ProfanityFilter();
+            const cleanedNote = note ? ProfanityFilter.filterText(note) : null;
+        
+            const result = await pool.query(
+                `INSERT INTO transactions 
+                (amount, type, category_id, account_id, note, receipt_path) 
+                VALUES ($1, $2, $3, $4, $5, $6) 
+                RETURNING *`,
+                [
+                    amount.toString(),
+                    type, 
+                    categoryId.toString(),
+                    accountId.toString(),
+                    cleanedNote,
+                    file ? `/receipts/${file.filename}` : null
+                ]
+            );
+        
+            reply.send(result.rows[0]);
+        } catch (err: unknown) {
+            const error = err as Error;
+            console.error('Transaction error:', error);
+            reply.status(500).send({
+                message: 'Server error processing transaction',
+                error: error.message
+            });
+        }
+    });
+    
+    
+        // API สำหรับอัพเดท note
+        server.patch('/transactions/:id/note', async (req, reply) => {
+            const { id } = req.params as { id: string };
+            const { note } = req.body as { note: string };
+    
+            // กรองคำหยาบ
+            const filter = new ProfanityFilter();
+            const cleanedNote = ProfanityFilter.filterText(note);
+    
+            try {
+                const result = await pool.query(
+                    "UPDATE transactions SET note = $1 WHERE id = $2 RETURNING *",
+                    [cleanedNote, id]
+                );
+    
+                if (result.rows.length === 0) {
+                    return reply.status(404).send({ message: 'Transaction not found' });
+                }
+    
+                reply.send(result.rows[0]);
+            } catch (err) {
+                reply.status(500).send(err);
+            }
+        });
+    
+        // API สำหรับอัพเดทรูปภาพ receipt
+        server.patch('/transactions/:id/receipt', {
+            preHandler: upload.single('receipt')
+        }, async (req, reply) => {
+            const { id } = req.params as { id: string };
+            const file = (req as any).file;
+    
+            if (!file) {
+                return reply.status(400).send({ message: 'No file uploaded' });
+            }
+    
+            try {
+                const result = await pool.query(
+                    "UPDATE transactions SET receipt_path = $1 WHERE id = $2 RETURNING *",
+                    [`/receipts/${file.filename}`, id]
+                );
+    
+                if (result.rows.length === 0) {
+                    return reply.status(404).send({ message: 'Transaction not found' });
+                }
+    
+                reply.send(result.rows[0]);
+            } catch (err) {
+                reply.status(500).send(err);
+            }
+        });
 }
